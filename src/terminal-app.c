@@ -1236,9 +1236,6 @@ terminal_app_init (TerminalApp *app)
   terminal_app_ensure_any_profiles (app);
 
   terminal_accels_init ();
-
-  /* FIXMEchpe: find out why this is necessary... */
-  g_application_hold (G_APPLICATION (app));
 }
 
 static void
@@ -1269,11 +1266,6 @@ terminal_app_finalize (GObject *object)
 
   terminal_accels_shutdown ();
 
-  if (app->object_manager) {
-    g_dbus_object_manager_server_unexport (app->object_manager, TERMINAL_FACTORY_OBJECT_PATH);
-    g_object_unref (app->object_manager);
-  }
-
   G_OBJECT_CLASS (terminal_app_parent_class)->finalize (object);
 
   global_app = NULL;
@@ -1282,8 +1274,45 @@ terminal_app_finalize (GObject *object)
 static void
 terminal_app_real_quit (TerminalApp *app)
 {
-  /* Release the hold added when creating the app  */
-  g_application_release (G_APPLICATION (app));
+}
+
+static gboolean
+terminal_app_dbus_register (GApplication    *application,
+                            GDBusConnection *connection,
+                            const gchar     *object_path,
+                            GCancellable    *cancellable,
+                            GError         **error)
+{
+  TerminalApp *app = TERMINAL_APP (application);
+  TerminalObjectSkeleton *object;
+  TerminalFactory *factory;
+
+  object = terminal_object_skeleton_new (TERMINAL_FACTORY_OBJECT_PATH);
+  factory = terminal_factory_impl_new ();
+  terminal_object_skeleton_set_factory (object, factory);
+  g_object_unref (factory);
+
+  app->object_manager = g_dbus_object_manager_server_new (TERMINAL_OBJECT_PATH_PREFIX);
+  g_dbus_object_manager_server_export (app->object_manager, G_DBUS_OBJECT_SKELETON (object));
+  g_object_unref (object);
+
+  /* And export the object */
+  g_dbus_object_manager_server_set_connection (app->object_manager, connection);
+  return TRUE;
+}
+
+static void
+terminal_app_dbus_unregister (GApplication    *application,
+                              GDBusConnection *connection,
+                              const gchar     *object_path)
+{
+  TerminalApp *app = TERMINAL_APP (application);
+
+  if (app->object_manager) {
+    g_dbus_object_manager_server_unexport (app->object_manager, TERMINAL_FACTORY_OBJECT_PATH);
+    g_object_unref (app->object_manager);
+    app->object_manager = NULL;
+  }
 }
 
 static void
@@ -1296,6 +1325,8 @@ terminal_app_class_init (TerminalAppClass *klass)
 
   g_application_class->activate = terminal_app_activate;
   g_application_class->startup = terminal_app_startup;
+  g_application_class->dbus_register = terminal_app_dbus_register;
+  g_application_class->dbus_unregister = terminal_app_dbus_unregister;
 
   klass->quit = terminal_app_real_quit;
 
@@ -1330,13 +1361,13 @@ terminal_app_class_init (TerminalAppClass *klass)
 /* Public API */
 
 GApplication *
-terminal_app_new (void)
+terminal_app_new (const char *bus_name)
 {
-  const GApplicationFlags flags = G_APPLICATION_NON_UNIQUE |
+  const GApplicationFlags flags = G_APPLICATION_REQUIRE_DBUS |
                                   G_APPLICATION_IS_SERVICE;
 
   return g_object_new (TERMINAL_TYPE_APP,
-                       "application-id", TERMINAL_UNIQUE_NAME,
+                       "application-id", bus_name ? bus_name : TERMINAL_UNIQUE_NAME,
                        "flags", flags,
                        NULL);
 }
@@ -1648,7 +1679,6 @@ terminal_app_get_system_font (TerminalApp *app)
 GDBusObjectManagerServer *
 terminal_app_get_object_manager (TerminalApp *app)
 {
-  if (app->object_manager == NULL)
-    app->object_manager = g_dbus_object_manager_server_new (TERMINAL_OBJECT_PATH_PREFIX);
+  g_warn_if_fail (app->object_manager != NULL);
   return app->object_manager;
 }
